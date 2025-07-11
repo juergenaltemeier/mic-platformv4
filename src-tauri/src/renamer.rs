@@ -15,6 +15,7 @@ pub struct FileEntry {
     pub old_name: String,
     pub new_name: String,
     pub path: String,
+    pub asset_url: String,
     pub date: DateTime<Utc>,
     pub tags: Vec<String>,
     pub suffix: String,
@@ -39,32 +40,36 @@ pub struct RenameHistoryEntry {
     pub new_path: String,
 }
 
-pub struct AppState {
-    pub files: Mutex<Vec<FileEntry>>,
-}
+use log::{info, warn, error};
 
-fn format_date(dt: DateTime<Utc>) -> String {
-    dt.format("%Y%m%d").to_string()
+fn format_date(date: &DateTime<Utc>) -> String {
+    date.format("%Y-%m-%d").to_string()
 }
 
 fn generate_new_name(file: &FileEntry, index: usize, total_files: usize, prefix: &str) -> String {
-    let tags_part = if file.tags.is_empty() {
-        "NOTAGS".to_string()
-    } else {
-        file.tags.join("-")
-    };
-    let date_part = format_date(file.date);
-    let inc = if total_files > 1 {
-        format!("_{}", index + 1)
-    } else {
-        "".to_string()
-    };
-    let suffix_part = if !file.suffix.is_empty() {
-        format!("_{}", file.suffix)
-    } else {
-        "".to_string()
-    };
-    format!("{}_{}_{}{}{}", prefix, tags_part, date_part, inc, suffix_part)
+    let formatted_date = format_date(&file.date);
+    let num_digits = total_files.to_string().len();
+    let sequence = format!("{:0width$}", index + 1, width = num_digits);
+    
+    let mut tags_part = file.tags.join("_");
+    if !tags_part.is_empty() {
+        tags_part.insert(0, '_');
+    }
+
+    let mut suffix_part = file.suffix.clone();
+    if !suffix_part.is_empty() {
+        suffix_part.insert(0, '_');
+    }
+
+    format!(
+        "{}_{}_{}{}{}",
+        prefix, formatted_date, sequence, tags_part, suffix_part
+    )
+}
+
+pub struct AppState {
+    pub files: Mutex<Vec<FileEntry>>,
+    pub prefix: Mutex<String>,
 }
 
 fn update_all_new_names(files: &mut Vec<FileEntry>, prefix: &str) {
@@ -74,45 +79,75 @@ fn update_all_new_names(files: &mut Vec<FileEntry>, prefix: &str) {
     }
 }
 
+use tauri::Url;
+
 #[tauri::command]
-pub fn import_files_from_dialog(paths: Vec<String>, recursive: bool, state: State<AppState>) -> Vec<FileEntry> {
+pub fn import_files_from_dialog(paths: Vec<String>, recursive: bool, _app: tauri::AppHandle, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Importing files from dialog. Recursive: {}", recursive);
     let mut file_entries = vec![];
     let mut all_paths = vec![];
 
     for path in paths {
-        if Path::new(&path).is_dir() {
-            let walker = WalkDir::new(&path).into_iter();
+        let path_obj = Path::new(&path);
+        if path_obj.is_dir() {
+            let mut walker_builder = WalkDir::new(&path);
             if !recursive {
-                walker.max_depth(1);
+                walker_builder = walker_builder.max_depth(1);
             }
-            for entry in walker.filter_map(Result::ok) {
+            for entry in walker_builder.into_iter().filter_map(Result::ok) {
                 if entry.file_type().is_file() {
-                    all_paths.push(entry.path().to_str().unwrap().to_string());
+                    if let Some(path_str) = entry.path().to_str() {
+                        all_paths.push(path_str.to_string());
+                    } else {
+                        warn!("Skipping path with invalid UTF-8: {:?}", entry.path());
+                    }
                 }
             }
         } else {
             all_paths.push(path);
         }
     }
+    info!("Found {} files to import.", all_paths.len());
 
     for path in all_paths {
         let id = Uuid::new_v4().to_string();
-        let metadata = fs::metadata(&path).unwrap();
-        let date = metadata.modified().unwrap().into();
-        let file_entry = FileEntry {
-            id,
-            old_name: Path::new(&path).file_name().unwrap().to_str().unwrap().to_string(),
-            new_name: "".to_string(),
-            path,
-            date,
-            tags: vec![],
-            suffix: "".to_string(),
-        };
-        file_entries.push(file_entry);
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                let date = metadata.modified().map(Into::into).unwrap_or_else(|_| Utc::now());
+                let file_name = Path::new(&path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("invalid_filename")
+                    .to_string();
+                
+                let asset_url = Url::from_file_path(&path).unwrap().to_string();
+
+                let file_entry = FileEntry {
+                    id,
+                    old_name: file_name,
+                    new_name: "".to_string(),
+                    path,
+                    asset_url,
+                    date,
+                    tags: vec![],
+                    suffix: "".to_string(),
+                };
+                file_entries.push(file_entry);
+            }
+            Err(e) => {
+                error!("Failed to get metadata for path {}: {}", path, e);
+            }
+        }
     }
-    update_all_new_names(&mut file_entries, "C");
-    *state.files.lock().unwrap() = file_entries.clone();
-    file_entries
+
+    let prefix = state.prefix.lock().unwrap().clone();
+    update_all_new_names(&mut file_entries, &prefix);
+    
+    let mut files_state = state.files.lock().unwrap();
+    *files_state = file_entries.clone();
+    
+    info!("Import complete. {} files loaded.", files_state.len());
+    files_state.clone()
 }
 
 #[tauri::command]
@@ -131,24 +166,17 @@ pub fn filter_files(filter: String, state: State<AppState>) -> Vec<FileEntry> {
 
 #[tauri::command]
 pub fn update_prefix(prefix: String, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Updating prefix to: {}", prefix);
     let mut files = state.files.lock().unwrap();
-    let new_prefix = if prefix.is_empty() { "C" } else { &prefix };
-    update_all_new_names(&mut files, new_prefix);
-    files.clone()
-}
-
-#[tauri::command]
-pub fn update_file(file_id: String, new_file: FileEntry, state: State<AppState>) -> Vec<FileEntry> {
-    let mut files = state.files.lock().unwrap();
-    if let Some(file) = files.iter_mut().find(|f| f.id == file_id) {
-        *file = new_file;
-    }
-    update_all_new_names(&mut files, "C");
+    let mut stored_prefix = state.prefix.lock().unwrap();
+    *stored_prefix = prefix.clone();
+    update_all_new_names(&mut files, &prefix);
     files.clone()
 }
 
 #[tauri::command]
 pub fn toggle_tag(file_ids: Vec<String>, tag: String, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Toggling tag '{}' for {} files", tag, file_ids.len());
     let mut files = state.files.lock().unwrap();
     let file_ids_set: HashSet<_> = file_ids.into_iter().collect();
 
@@ -166,51 +194,61 @@ pub fn toggle_tag(file_ids: Vec<String>, tag: String, state: State<AppState>) ->
             }
         }
     }
-    update_all_new_names(&mut files, "C");
+    let prefix = state.prefix.lock().unwrap();
+    update_all_new_names(&mut files, &prefix);
     files.clone()
 }
 
 #[tauri::command]
 pub fn update_tags(file_id: String, tags: Vec<String>, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Updating tags for file: {}", file_id);
     let mut files = state.files.lock().unwrap();
     if let Some(file) = files.iter_mut().find(|f| f.id == file_id) {
         file.tags = tags;
     }
-    update_all_new_names(&mut files, "C");
+    let prefix = state.prefix.lock().unwrap();
+    update_all_new_names(&mut files, &prefix);
     files.clone()
 }
 
 #[tauri::command]
 pub fn update_date(file_id: String, date: DateTime<Utc>, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Updating date for file: {}", file_id);
     let mut files = state.files.lock().unwrap();
     if let Some(file) = files.iter_mut().find(|f| f.id == file_id) {
         file.date = date;
     }
-    update_all_new_names(&mut files, "C");
+    let prefix = state.prefix.lock().unwrap();
+    update_all_new_names(&mut files, &prefix);
     files.clone()
 }
 
 #[tauri::command]
 pub fn update_suffix(file_id: String, suffix: String, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Updating suffix for file: {}", file_id);
     let mut files = state.files.lock().unwrap();
     if let Some(file) = files.iter_mut().find(|f| f.id == file_id) {
         file.suffix = suffix;
     }
-    update_all_new_names(&mut files, "C");
+    let prefix = state.prefix.lock().unwrap();
+    update_all_new_names(&mut files, &prefix);
     files.clone()
 }
 
 #[tauri::command]
 pub fn remove_files(file_ids: Vec<String>, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Removing {} files", file_ids.len());
     let mut files = state.files.lock().unwrap();
     let file_ids_set: HashSet<_> = file_ids.into_iter().collect();
     files.retain(|f| !file_ids_set.contains(&f.id));
-    update_all_new_names(&mut files, "C");
+    let prefix = state.prefix.lock().unwrap();
+    update_all_new_names(&mut files, &prefix);
     files.clone()
 }
 
 #[tauri::command]
 pub fn clear_all(state: State<AppState>) -> Vec<FileEntry> {
+    info!("Clearing all files");
     let mut files = state.files.lock().unwrap();
     files.clear();
     files.clone()
@@ -218,44 +256,60 @@ pub fn clear_all(state: State<AppState>) -> Vec<FileEntry> {
 
 #[tauri::command]
 pub fn clear_suffix(file_ids: Vec<String>, state: State<AppState>) -> Vec<FileEntry> {
+    info!("Clearing suffix for {} files", file_ids.len());
     let mut files = state.files.lock().unwrap();
     let file_ids_set: HashSet<_> = file_ids.into_iter().collect();
     for file in files.iter_mut().filter(|f| file_ids_set.contains(&f.id)) {
         file.suffix = "".to_string();
     }
-    update_all_new_names(&mut files, "C");
+    let prefix = state.prefix.lock().unwrap();
+    update_all_new_names(&mut files, &prefix);
     files.clone()
 }
 
 #[tauri::command]
 pub fn rename_files(files_to_rename: Vec<FileEntry>, state: State<AppState>) -> RenameResult {
+    info!("Starting rename process for {} files.", files_to_rename.len());
     let mut success_count = 0;
     let mut error_count = 0;
     let mut errors = vec![];
 
-    for file in files_to_rename {
+    for file in &files_to_rename {
         let old_path = Path::new(&file.path);
-        let new_name = format!(
-            "{}.{}",
-            file.new_name,
-            old_path.extension().unwrap().to_str().unwrap()
-        );
-        let new_path = old_path.with_file_name(new_name);
+        let extension = old_path.extension().and_then(|s| s.to_str());
 
-        if let Err(e) = fs::rename(&old_path, &new_path) {
+        if let Some(ext) = extension {
+            let new_name_with_ext = format!("{}.{}", file.new_name, ext);
+            let new_path = old_path.with_file_name(&new_name_with_ext);
+            
+            info!("Renaming '{}' -> '{}'", file.path, new_path.display());
+
+            if let Err(e) = fs::rename(&old_path, &new_path) {
+                error!("Failed to rename {}: {}", old_path.display(), e);
+                error_count += 1;
+                errors.push(RenameError {
+                    file: file.old_name.clone(),
+                    error: e.to_string(),
+                });
+            } else {
+                success_count += 1;
+            }
+        } else {
+            error!("Could not get extension for file: {}", file.path);
             error_count += 1;
             errors.push(RenameError {
-                file: file.old_name,
-                error: e.to_string(),
+                file: file.old_name.clone(),
+                error: "File has no extension.".to_string(),
             });
-        } else {
-            success_count += 1;
         }
     }
 
     if error_count == 0 {
+        info!("All files renamed successfully. Clearing state.");
         let mut files = state.files.lock().unwrap();
         files.clear();
+    } else {
+        warn!("Rename process finished with {} errors.", error_count);
     }
 
     RenameResult {
@@ -267,12 +321,15 @@ pub fn rename_files(files_to_rename: Vec<FileEntry>, state: State<AppState>) -> 
 
 #[tauri::command]
 pub fn undo_rename(rename_history: Vec<RenameHistoryEntry>) -> RenameResult {
+    info!("Starting undo process for {} files.", rename_history.len());
     let mut success_count = 0;
     let mut error_count = 0;
     let mut errors = vec![];
 
     for entry in rename_history {
+        info!("Undoing rename: '{}' -> '{}'", entry.new_path, entry.old_path);
         if let Err(e) = fs::rename(&entry.new_path, &entry.old_path) {
+            error!("Failed to undo rename for {}: {}", entry.new_path, e);
             error_count += 1;
             errors.push(RenameError {
                 file: entry.new_path,
@@ -282,7 +339,7 @@ pub fn undo_rename(rename_history: Vec<RenameHistoryEntry>) -> RenameResult {
             success_count += 1;
         }
     }
-
+    info!("Undo process complete. Success: {}, Errors: {}", success_count, error_count);
     RenameResult {
         success_count,
         error_count,

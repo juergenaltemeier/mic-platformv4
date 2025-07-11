@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client'
 import { createHashRouter, RouterProvider } from 'react-router-dom'
 import { App } from './App'
 import { Dashboard } from './pages/Dashboard'
-import { RenamerPage as Renamer } from './pages/Renamer'
+import Renamer from './pages/Renamer';
 
 import { SettingsPage } from './pages/Settings'
 

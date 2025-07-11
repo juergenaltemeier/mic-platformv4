@@ -17,10 +17,23 @@ interface PreviewPanelProps {
   onPrev: () => void
 }
 
-// Helper to convert a file path to a URL that Electron can use
-const toFileUrl = (path: string): string => {
-  if (!path) return ''
-  return `file://${path.replace(/\\/g, '/')}`
+import { useState, useEffect } from 'react'
+import { FileEntry } from '../types'
+import { Button } from '../../../../components/ui/button'
+import {
+  ZoomInIcon,
+  ZoomOutIcon,
+  RotateCcwIcon,
+  RotateCwIcon,
+  MaximizeIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+} from 'lucide-react'
+
+interface PreviewPanelProps {
+  selected: FileEntry | null
+  onNext: () => void
+  onPrev: () => void
 }
 
 export function PreviewPanel({ selected, onNext, onPrev }: PreviewPanelProps) {
@@ -45,7 +58,7 @@ export function PreviewPanel({ selected, onNext, onPrev }: PreviewPanelProps) {
   const rotateLeft = () => setRotation((prev) => prev - 90)
   const rotateRight = () => setRotation((prev) => prev + 90)
 
-  const previewSrc = selected && selected.path ? toFileUrl(selected.path) : ''
+  const previewSrc = selected ? selected.assetUrl : ''
 
   return (
     <div className="flex flex-col bg-background overflow-hidden w-full h-full">
@@ -84,11 +97,13 @@ export function PreviewPanel({ selected, onNext, onPrev }: PreviewPanelProps) {
               transform: `scale(${zoom}) rotate(${rotation}deg)`,
             }}
           >
-            {selected.file.type.startsWith('image') ? (
+            {selected.path.toLowerCase().endsWith('.heic') ? (
+              <p>HEIC Preview not supported</p>
+            ) : selected.path.toLowerCase().match(/\.(jpeg|jpg|gif|png|webp)$/) ? (
               <img
                 src={previewSrc}
                 className="max-h-full max-w-full object-contain"
-                alt={selected.oldName}
+                alt={selected.old_name}
               />
             ) : (
               <video

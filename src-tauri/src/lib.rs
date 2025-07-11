@@ -1,5 +1,6 @@
 mod renamer;
 
+use std::sync::Mutex;
 use renamer::AppState;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -10,8 +11,12 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    env_logger::init();
     tauri::Builder::default()
-        .manage(AppState { files: Default::default() })
+        .manage(AppState { 
+            files: Default::default(),
+            prefix: Mutex::new("C".to_string()),
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -19,7 +24,6 @@ pub fn run() {
             renamer::import_files_from_dialog,
             renamer::filter_files,
             renamer::update_prefix,
-            renamer::update_file,
             renamer::toggle_tag,
             renamer::update_tags,
             renamer::update_date,

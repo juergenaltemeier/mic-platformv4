@@ -19,11 +19,13 @@ interface FilesTableProps {
 export function FilesTable({ files, onSelectionChange, onDateChange, onSuffixChange, onTagsChange, selectedRows, columnSizes, onColumnResize, onFilter }: FilesTableProps): React.ReactElement {
   const columns = getColumns({ onDateChange, onSuffixChange, onTagsChange });
 
+  const filteredFiles = files.filter(Boolean);
+
   return (
     <div className="h-full flex flex-col">
       <DataTable 
         columns={columns} 
-        data={files} 
+        data={filteredFiles} 
         onSelectionChange={onSelectionChange} 
         selectedRows={selectedRows} 
         columnSizes={columnSizes} 

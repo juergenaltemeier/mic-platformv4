@@ -1,19 +1,15 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { FileEntry } from '../types'
 import tagsJson from '../config/tags.json'
 import { defaults } from '../config/defaults'
 import { toast } from "sonner"
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import debounce from 'lodash.debounce';
 
 interface LoadingState {
   isLoading: boolean;
   progress: number;
-}
-
-interface FileWithPaths extends File {
-  path: string;
-  webkitRelativePath: string;
 }
 
 export function useRenamer() {
@@ -42,6 +38,10 @@ export function useRenamer() {
   }
   const [settings, setSettings] = useState<RenamerSettings>(defaultSettings)
 
+  const handleSettingsChange = (newSettings: Partial<RenamerSettings>) => {
+    setSettings(prev => ({ ...prev, ...newSettings }));
+  };
+
   useEffect(() => {
     try {
       const stored = localStorage.getItem('renamerSettings')
@@ -61,40 +61,15 @@ export function useRenamer() {
     }
   }, [settings])
 
-  const importFromEvent = async (
-    filesList: FileList,
-    recursive: boolean
-  ): Promise<void> => {
+  const handleFileDropEvent = async (paths: string[]): Promise<void> => {
     setLoadingState({ isLoading: true, progress: 0 });
-    const fileArray = Array.from(filesList)
-      .filter((f) => {
-        const parts = f.name.split('.')
-        const ext = parts.length > 1 ? parts.pop()!.toLowerCase() : ''
-        return settings.allowedFileTypes.includes(ext)
-      })
-      .filter((f) => f.type.startsWith('image') || f.type.startsWith('video'))
-      .filter((f: File) => {
-        if (recursive) return true
-        const path = (f as FileWithPaths).webkitRelativePath as string | undefined
-        if (!path) return true
-        return path.split('/').length <= 2
-      })
-
-    const paths = fileArray.map(f => (f as FileWithPaths).path || f.webkitRelativePath || f.name);
-    
-    const newFiles: FileEntry[] = await invoke("init_files", { files: paths });
+    const newFiles: FileEntry[] = await invoke("import_files_from_dialog", { paths });
     setFiles(newFiles);
-
-    if (newFiles.length > 0) {
-        // How to get the first entry with ID?
-        // For now, let's just clear selection
-        setSelected([]);
-        setLastSelected(null);
-    }
     setLoadingState({ isLoading: false, progress: 100 });
-  }
+  };
 
   const handleImportFiles = async (): Promise<void> => {
+    console.log("handleImportFiles called");
     const selected = await open({
       multiple: true,
       filters: [{
@@ -109,6 +84,7 @@ export function useRenamer() {
   };
 
   const handleImportFolder = async (): Promise<void> => {
+    console.log("handleImportFolder called");
     const selected = await open({
       directory: true,
       multiple: false,
@@ -120,6 +96,7 @@ export function useRenamer() {
   };
 
   const handleImportFolderRecursive = async (): Promise<void> => {
+    console.log("handleImportFolderRecursive called");
     const selected = await open({
       directory: true,
       multiple: false,
@@ -129,18 +106,6 @@ export function useRenamer() {
       setFiles(newFiles);
     }
   };
-
-  const handleImport = (e: React.ChangeEvent<HTMLInputElement>): void => {
-    const fileList = e.target.files
-    if (!fileList) return
-    importFromEvent(fileList, true)
-  }
-
-  const handleImportFlat = (e: React.ChangeEvent<HTMLInputElement>): void => {
-    const fileList = e.target.files
-    if (!fileList) return
-    importFromEvent(fileList, false)
-  }
 
   const tagOptions = Object.entries(tagsJson).map(([id, labels]) => ({
     id,
@@ -173,6 +138,7 @@ export function useRenamer() {
   };
   
   const handleUndoRename = async (): Promise<void> => {
+    console.log("handleUndoRename called");
     if (renameHistory.length === 0) return;
 
     try {
@@ -198,6 +164,7 @@ export function useRenamer() {
   };
 
   const handleRemoveSelected = (): void => {
+    console.log("handleRemoveSelected called");
     if (selected.length > 0) {
         const fileIds = selected.map(s => s.id);
         invoke("remove_files", { fileIds }).then(setFiles);
@@ -206,6 +173,7 @@ export function useRenamer() {
   }
 
   const handleClearSuffix = (): void => {
+    console.log("handleClearSuffix called");
     if (selected.length > 0) {
         const fileIds = selected.map(s => s.id);
         invoke("clear_suffix", { fileIds }).then(setFiles);
@@ -213,6 +181,7 @@ export function useRenamer() {
   }
 
   const handleClearAll = (): void => {
+    console.log("handleClearAll called");
     invoke("clear_all").then(setFiles);
     setSelected([])
   }
@@ -232,24 +201,45 @@ export function useRenamer() {
     }
   }
 
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const lastSelectedRef = useRef(lastSelected);
+  lastSelectedRef.current = lastSelected;
+
+
+  const debouncedSelectionHandler = useCallback(
+    debounce((entry: FileEntry, ctrlKey: boolean, shiftKey: boolean) => {
+      console.log("Debounced selection handler triggered");
+      const currentFiles = filesRef.current;
+      const currentSelected = selectedRef.current;
+      const currentLastSelected = lastSelectedRef.current;
+
+      const currentIndex = currentFiles.findIndex(f => f.id === entry.id);
+      if (shiftKey && currentLastSelected) {
+        const lastIndex = currentFiles.findIndex(f => f.id === currentLastSelected.id);
+        const start = Math.min(currentIndex, lastIndex);
+        const end = Math.max(currentIndex, lastIndex);
+        const range = currentFiles.slice(start, end + 1);
+        setSelected(range);
+      } else if (ctrlKey) {
+        const newSelection = currentSelected.some(sel => sel.id === entry.id)
+          ? currentSelected.filter(sel => sel.id !== entry.id)
+          : [...currentSelected, entry];
+        setSelected(newSelection);
+        setLastSelected(entry);
+      } else {
+        setSelected([entry]);
+        setLastSelected(entry);
+      }
+    }, 100), // 100ms debounce delay
+    [] // No dependencies, relies on refs
+  );
+
   const handleSelection = (entry: FileEntry, ctrlKey: boolean, shiftKey: boolean): void => {
-    const currentIndex = files.findIndex(f => f.id === entry.id);
-    if (shiftKey && lastSelected) {
-      const lastIndex = files.findIndex(f => f.id === lastSelected.id);
-      const start = Math.min(currentIndex, lastIndex);
-      const end = Math.max(currentIndex, lastIndex);
-      const range = files.slice(start, end + 1);
-      setSelected(range);
-    } else if (ctrlKey) {
-      const newSelection = selected.some(sel => sel.id === entry.id)
-        ? selected.filter(sel => sel.id !== entry.id)
-        : [...selected, entry];
-      setSelected(newSelection);
-      setLastSelected(entry);
-    } else {
-      setSelected([entry]);
-      setLastSelected(entry);
-    }
+    console.log("handleSelection called");
+    debouncedSelectionHandler(entry, ctrlKey, shiftKey);
   };
 
   useEffect(() => {
@@ -364,8 +354,10 @@ export function useRenamer() {
     handleSelection,
     prefixNumber,
     setPrefixNumber,
-    handleImport,
-    handleImportFlat,
+    handleImportFiles,
+    handleImportFolder,
+    handleImportFolderRecursive,
+    handleFileDropEvent,
     tagOptions,
     toggleTag,
     handleTagsCellChange,
@@ -388,5 +380,6 @@ export function useRenamer() {
     handleApplyRename,
     canUndo,
     handleFilter,
+    handleSettingsChange,
   }
 }
